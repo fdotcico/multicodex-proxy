@@ -39,8 +39,9 @@ import type {
 import {
   accountSelectionPool,
   accountUsable,
-  chooseAccountForProvider,
+  buildAccountSelectionTelemetry,
   clearEmptyResponseHistory,
+  commitAccountSelection,
   getZaiBlockDuration,
   isQuotaErrorText,
   markEmptyResponseError,
@@ -49,6 +50,7 @@ import {
   normalizeProvider,
   parseZaiErrorCode,
   rememberError,
+  selectAccountForProvider,
   shouldBlockAccountForZaiError,
 } from "../../quota.js";
 import {
@@ -2402,6 +2404,14 @@ export function createProxyRouter(options: ProxyRoutesOptions) {
         )?.resource;
 
         const quotaAwareAccounts = accountSelectionPool(usableAccounts);
+        const previousAffinityAccountId =
+          sessionAffinityEnabled && codexSessionId
+            ? sessionAffinity.peek(
+                affinityApplication,
+                codexSessionId,
+                candidate.provider,
+              )
+            : undefined;
         const affinityAccount = findSessionAffinityAccount(
           sessionAffinity,
           sessionAffinityEnabled,
@@ -2422,11 +2432,41 @@ export function createProxyRouter(options: ProxyRoutesOptions) {
             )
           : undefined;
 
+        const quotaSelection = selectAccountForProvider(
+          usableAccounts,
+          candidate.provider,
+          { advanceCursor: false },
+        );
         const selected =
           preferSessionAffinityAccount(affinityAccount, preferredAccount) ??
-          chooseAccountForProvider(usableAccounts, candidate.provider);
+          quotaSelection.account;
 
         if (!selected) break;
+
+        const selectionReason = affinityAccount
+          ? "sticky"
+          : preferredAccount
+            ? "policy-preferred"
+            : "quota-headroom";
+        const previousAttemptAccountId = completedRoutingAccountId;
+        const accountSelection = buildAccountSelectionTelemetry(
+          quotaSelection,
+          selected,
+          selectionReason,
+          Boolean(
+            (previousAttemptAccountId &&
+              previousAttemptAccountId !== selected.id) ||
+              (previousAffinityAccountId &&
+                previousAffinityAccountId !== selected.id),
+          ),
+        );
+
+        // The quota selector's round-robin cursor is only advanced when its
+        // choice is the account actually used for this attempt. Sticky and
+        // policy-preferred overrides must not consume a round-robin slot.
+        if (quotaSelection.account?.id === selected.id) {
+          commitAccountSelection(candidate.provider, selected.id);
+        }
 
         if (sessionAffinityEnabled && codexSessionId) {
           // Remember the last selected eligible account. If it fails and the
@@ -2597,6 +2637,7 @@ export function createProxyRouter(options: ProxyRoutesOptions) {
           accountPreparationTrace.asynchronous
             ? { accountPreparation: accountPreparationTrace }
             : {}),
+          accountSelection,
           ...(compactionItemCount
             ? {
                 inputContext: {
@@ -2833,6 +2874,7 @@ export function createProxyRouter(options: ProxyRoutesOptions) {
                 accountEmail: selected.email,
                 model: tracedModel,
                 ...traceModelResolution,
+                ...traceImage,
                 status: upstream.status,
                 stream: true,
                 latencyMs: Date.now() - startedAt,
@@ -2878,6 +2920,7 @@ export function createProxyRouter(options: ProxyRoutesOptions) {
               accountEmail: selected.email,
               model: tracedModel,
               ...traceModelResolution,
+              ...traceImage,
               status: upstream.status,
               stream: true,
               latencyMs: Date.now() - startedAt,

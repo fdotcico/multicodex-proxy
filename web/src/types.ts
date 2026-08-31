@@ -60,6 +60,17 @@ export type Trace = {
   accountId?: string;
   accountEmail?: string;
   provider?: "openai" | "openai-compatible" | "opencode" | "mistral" | "zai" | "xai";
+  accountSelection?: {
+    reason: "sticky" | "policy-preferred" | "quota-headroom";
+    provider: "openai" | "openai-compatible" | "opencode" | "mistral" | "zai" | "xai";
+    candidateCount: number;
+    eligibleCount: number;
+    nearLimitCount: number;
+    rotated: boolean;
+    selectedHeadroomPercent?: number;
+    selectedWeeklyRemainingPercent?: number;
+    selectedFiveHourRemainingPercent?: number;
+  };
   model?: string;
   requestedModel?: string;
   resolvedModel?: string;
@@ -141,6 +152,17 @@ export type TraceStats = {
     confidence: "low" | "sufficient";
     rank?: number;
   }>;
+  accountSelection: {
+    attempts: number;
+    rotations: number;
+    maxNearLimit: number;
+    averageHeadroom?: number;
+    reasonCounts: {
+      sticky: number;
+      "policy-preferred": number;
+      "quota-headroom": number;
+    };
+  };
 };
 
 export type TracePagination = {

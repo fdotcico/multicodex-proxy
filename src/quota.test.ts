@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildAccountSelectionTelemetry,
+  commitAccountSelection,
   chooseAccount,
   parseOpenCodeUsage,
   refreshUsageIfNeeded,
+  selectAccountForProvider,
 } from "./quota.js";
 import type { Account } from "./types.js";
 
@@ -101,6 +104,95 @@ test("keeps a five-hour account in rotation below the near-limit threshold", () 
   const second = chooseAccount([withFiveHourQuota, withoutFiveHourQuota])?.id;
 
   assert.notEqual(first, second);
+});
+
+test("prefers the account with the greatest quota headroom across windows", () => {
+  const fiveHourConstrained = account("five-hour-constrained", 98, 10);
+  const weeklyConstrained = account("weekly-constrained", 90, 60);
+
+  const decision = selectAccountForProvider(
+    [fiveHourConstrained, weeklyConstrained],
+    "openai",
+  );
+
+  assert.equal(decision.account?.id, "weekly-constrained");
+  assert.equal(decision.selectedHeadroomPercent, 10);
+  assert.equal(decision.selectedWeeklyRemainingPercent, 40);
+  assert.equal(decision.selectedFiveHourRemainingPercent, 10);
+  assert.equal(decision.candidateCount, 2);
+  assert.equal(decision.eligibleCount, 2);
+});
+
+test("keeps provider selection isolated when no account matches", () => {
+  const decision = selectAccountForProvider(
+    [account("openai-only", 10, 10)],
+    "mistral",
+  );
+
+  assert.equal(decision.provider, "mistral");
+  assert.equal(decision.account, null);
+  assert.equal(decision.candidateCount, 0);
+  assert.equal(decision.eligibleCount, 0);
+});
+
+test("does not consume the round-robin cursor for an overridden selection", () => {
+  const first = account("cursor-a", 0, 0);
+  const second = account("cursor-b", 0, 0);
+  commitAccountSelection("openai", first.id);
+
+  const quotaSelection = selectAccountForProvider(
+    [first, second],
+    "openai",
+    { advanceCursor: false },
+  );
+  assert.equal(quotaSelection.account?.id, second.id);
+
+  // A sticky/policy override uses the first account, so the quota choice must
+  // not advance the cursor. The next quota-only selection remains second.
+  const nextQuotaSelection = selectAccountForProvider(
+    [first, second],
+    "openai",
+    { advanceCursor: false },
+  );
+  assert.equal(nextQuotaSelection.account?.id, second.id);
+
+  // Once the quota-selected account is actually used, committing it advances
+  // the cursor and restores the normal alternation for the following choice.
+  commitAccountSelection("openai", quotaSelection.account!.id);
+  const afterQuotaCommit = selectAccountForProvider(
+    [first, second],
+    "openai",
+    { advanceCursor: false },
+  );
+  assert.equal(afterQuotaCommit.account?.id, first.id);
+});
+
+test("builds account-selection telemetry from the final selected account", () => {
+  const quotaAccount = account("telemetry-quota", 10, 10);
+  const stickyAccount = account("telemetry-sticky", 20, 20);
+  const decision = selectAccountForProvider(
+    [quotaAccount, stickyAccount],
+    "openai",
+    { advanceCursor: false },
+  );
+
+  const telemetry = buildAccountSelectionTelemetry(
+    decision,
+    stickyAccount,
+    "sticky",
+    true,
+  );
+  assert.deepEqual(telemetry, {
+    reason: "sticky",
+    provider: "openai",
+    candidateCount: 2,
+    eligibleCount: 2,
+    nearLimitCount: 0,
+    rotated: true,
+    selectedHeadroomPercent: 80,
+    selectedWeeklyRemainingPercent: 80,
+    selectedFiveHourRemainingPercent: 80,
+  });
 });
 
 test("normalizes OpenCode Go rolling, weekly, and monthly quotas", () => {
