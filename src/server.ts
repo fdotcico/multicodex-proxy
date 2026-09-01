@@ -48,14 +48,7 @@ import {
   identifyProxyApplication,
   parseProxyApiKeys,
 } from "./proxy-api-keys.js";
-import { traceHeadersForRequest } from "./trace-headers.js";
-import {
-  CodexProjectRegistry,
-  extractCodexProjectHost,
-  extractCodexProjectRoot,
-  extractCodexSessionId,
-  extractLiteLLMProjectAttribution,
-} from "./codex-projects.js";
+import { CodexProjectRegistry } from "./codex-projects.js";
 import { anthropicErrorEnvelope } from "./anthropic-compat.js";
 import { CapacityTracker } from "./smart-routing.js";
 import { JobRunner, JobStore } from "./jobs.js";
@@ -64,6 +57,7 @@ import {
   createAdmissionMiddleware,
   createSmartRoutingRouter,
 } from "./smart-routing-routes.js";
+import { createRequestTracingMiddleware } from "./request-tracing.js";
 
 const app = express();
 app.use(createBodyParserMiddleware());
@@ -124,43 +118,13 @@ startScheduledWeeklyResetMonitor({
   openaiBaseUrl: CHATGPT_BASE_URL,
 });
 
-// Catch-all request tracing — records every request even if it doesn't hit an official endpoint.
-// Routes that record their own detailed trace (e.g. /v1/chat/completions) set res.locals._multivibeTraced
-// so we don't double-count them.
-app.use((req, res, next) => {
-  const startedAt = Date.now();
-  const route = req.originalUrl || req.url;
-
-  res.on("finish", () => {
-    if (res.locals._multivibeTraced) return;
-    const pathOrUrl = req.path || req.originalUrl || "";
-    if (
-      pathOrUrl.startsWith("/admin/") ||
-      pathOrUrl.startsWith("/assets/") ||
-      pathOrUrl === "/favicon.ico"
-    )
-      return;
-    traceManager.recordTrace({
-      ...(res.locals.multivibeTrace ?? {}),
-      ...extractLiteLLMProjectAttribution(req.headers),
-      codexProjectHost: extractCodexProjectHost(req.headers),
-      codexProjectRoot: extractCodexProjectRoot(req.headers),
-      at: Date.now(),
-      route: `${req.method} ${route}`,
-      application: res.locals.proxyApplication,
-      codexSessionId: extractCodexSessionId(req.headers),
-      requestHeaders: TRACE_INCLUDE_HEADERS
-        ? traceHeadersForRequest(req.headers)
-        : undefined,
-      status: res.statusCode,
-      stream: false,
-      latencyMs: Date.now() - startedAt,
-      requestBody: TRACE_INCLUDE_BODY ? req.body : undefined,
-    });
-  });
-
-  next();
-});
+app.use(
+  createRequestTracingMiddleware({
+    traceManager,
+    includeBody: TRACE_INCLUDE_BODY,
+    includeHeaders: TRACE_INCLUDE_HEADERS,
+  }),
+);
 
 const adminRouter = createAdminRouter({
   store,
